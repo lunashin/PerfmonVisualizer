@@ -12,6 +12,7 @@ Private mBusy As Boolean
 
 Private Type CounterSpec
     Header As String
+    Description As String
     ColumnIndex As Long
     GroupIndex As Long
     LineColor As Long
@@ -51,6 +52,7 @@ Public Function VisualizePerfmonCsv() As Boolean
 
     suffix = Format$(CDate(started), "yyyymmddhhnn") & "-" & _
              Format$(CDate(ended), "yyyymmddhhnn")
+
     dataName = "data_" & suffix
     graphName = "graph_" & suffix
 
@@ -186,7 +188,10 @@ Private Sub ResolveColumns(ByVal ds As Worksheet, _
     names.CompareMode = vbBinaryCompare
 
     lastColumn = ds.Cells(1, ds.Columns.Count).End(xlToLeft).Column
-    If lastColumn < 2 Then Fail "The data sheet has no counter columns."
+
+    If lastColumn < 2 Then
+        Fail "The data sheet has no counter columns."
+    End If
 
     For c = 1 To lastColumn
         If IsError(ds.Cells(1, c).Value2) Then Fail "Invalid data header."
@@ -308,7 +313,6 @@ Private Sub ImportCsvData(ByVal path As String, _
     dateRx.Pattern = "^([0-9]{1,4})[/-]([0-9]{1,2})[/-]([0-9]{1,4})[ T]+([0-9]{1,2}):([0-9]{2}):([0-9]{2})(\.[0-9]+)?[ ]*(AM|PM)?$"
 
     ds.Rows(1).NumberFormat = "@"
-
     ReDim buf(1 To 1, 1 To nCols)
 
     For c = 1 To nCols
@@ -360,6 +364,7 @@ Private Sub ImportCsvData(ByVal path As String, _
         If n = BATCH_ROWS Then
             ds.Cells(total - n + 1, 1).Resize(n, nCols).Value2 = buf
             n = 0
+
             ReDim buf(1 To BATCH_ROWS, 1 To nCols)
 
             Application.StatusBar = _
@@ -380,7 +385,6 @@ NextRecord:
 
     ds.Rows(1).Font.Bold = True
     ds.Columns(1).ColumnWidth = 25
-
     ds.Range(ds.Cells(1, 2), ds.Cells(1, nCols)).EntireColumn.ColumnWidth = 18
     ds.Range(ds.Cells(1, 1), ds.Cells(total, nCols)).AutoFilter
 End Sub
@@ -402,7 +406,6 @@ Private Sub BeginWork(ByRef state As ExcelState)
     End With
 
     mBusy = True
-
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.DisplayAlerts = False
@@ -504,7 +507,9 @@ Private Function GetConsole() As Worksheet
     Set GetConsole = ThisWorkbook.Worksheets(CONSOLE_NAME)
     On Error GoTo 0
 
-    If GetConsole Is Nothing Then Fail "Sheet not found: " & CONSOLE_NAME
+    If GetConsole Is Nothing Then
+        Fail "Sheet not found: " & CONSOLE_NAME
+    End If
 End Function
 
 Private Sub ReadSettings(ByVal ws As Worksheet, _
@@ -512,12 +517,11 @@ Private Sub ReadSettings(ByVal ws As Worksheet, _
                          ByRef itemCount As Long, _
                          ByRef labels() As String, _
                          ByRef groupCount As Long)
-    Dim groups As Object, r As Long
+    Dim groups As Object, r As Long, g As Long
     Dim header As String, key As String
     Dim v As Variant, groupNumber As Double
 
     Set groups = CreateObject("Scripting.Dictionary")
-
     ReDim specs(1 To 51)
     ReDim labels(1 To 51)
 
@@ -529,6 +533,10 @@ Private Sub ReadSettings(ByVal ws As Worksheet, _
         header = Trim$(CStr(ws.Cells(r, "B").Value2))
 
         If Len(header) > 0 Then
+            If IsError(ws.Cells(r, "D").Value2) Then
+                Fail "Invalid D" & CStr(r)
+            End If
+
             v = ws.Cells(r, "C").Value2
             If IsError(v) Then Fail "Invalid C" & CStr(r)
 
@@ -555,19 +563,24 @@ Private Sub ReadSettings(ByVal ws As Worksheet, _
             If Not groups.Exists(key) Then
                 groupCount = groupCount + 1
                 groups.Add key, groupCount
-
-                If Left$(key, 6) = "GROUP:" Then
-                    labels(groupCount) = "Graph " & Mid$(key, 7)
-                End If
             End If
 
             itemCount = itemCount + 1
 
             With specs(itemCount)
                 .Header = header
+                .Description = Trim$(CStr(ws.Cells(r, "D").Value2))
                 .GroupIndex = CLng(groups(key))
                 .LineColor = CLng(ws.Cells(r, "B").DisplayFormat.Font.Color)
             End With
+
+            g = specs(itemCount).GroupIndex
+
+            If Len(labels(g)) > 0 Then
+                labels(g) = labels(g) & vbLf
+            End If
+
+            labels(g) = labels(g) & CounterTitle(specs(itemCount))
         End If
     Next r
 
@@ -584,7 +597,6 @@ End Sub
 Private Function PositivePixels(ByVal cell As Range, _
                                 ByVal blankDefault As Double) As Double
     Dim v As Variant
-
     v = cell.Value2
 
     If IsError(v) Then Fail "Invalid " & cell.Address(False, False)
@@ -660,6 +672,36 @@ Private Sub ReadBoundary(ByVal cell As Range, _
     End If
 End Sub
 
+Private Function CounterTitle(ByRef spec As CounterSpec) As String
+    CounterTitle = spec.Header & "(" & spec.Description & ")"
+End Function
+
+' XY charts provide a numeric time axis; 1/24 day is exactly one hour.
+Private Sub SetHourlyTimeAxis(ByVal chart As Chart, _
+                              ByVal firstStamp As Double, _
+                              ByVal lastStamp As Double)
+    Dim axisMin As Double, axisMax As Double
+
+    axisMin = Int(firstStamp * 24#) / 24#
+    axisMax = -Int(-lastStamp * 24#) / 24#
+
+    If axisMax <= axisMin Then
+        axisMax = axisMin + 1# / 24#
+    End If
+
+    With chart.Axes(xlCategory, xlPrimary)
+        .MinimumScale = axisMin
+        .MaximumScale = axisMax
+        .MajorUnit = 1# / 24#
+        .TickLabels.NumberFormatLinked = False
+        .TickLabels.NumberFormat = "mm/dd hh:mm"
+        .TickLabels.Orientation = 45
+        .MajorTickMark = xlTickMarkOutside
+        .MinorTickMark = xlTickMarkNone
+        .TickLabelPosition = xlTickLabelPositionLow
+    End With
+End Sub
+
 Private Sub BuildCharts(ByVal ds As Worksheet, _
                         ByVal gs As Worksheet, _
                         ByRef specs() As CounterSpec, _
@@ -672,7 +714,6 @@ Private Sub BuildCharts(ByVal ds As Worksheet, _
                         ByVal heightPx As Double, _
                         ByVal wn As Excel.Window)
     Dim g As Long, i As Long, memberCount As Long
-    Dim singleTitle As String
     Dim co As ChartObject, ser As Series, values As Range, x As Range
     Dim maxValue As Double, candidate As Double
     Dim width As Double, height As Double, gap As Double
@@ -695,7 +736,7 @@ Private Sub BuildCharts(ByVal ds As Worksheet, _
         memberCount = 0
 
         With co.Chart
-            .ChartType = xlLine
+            .ChartType = xlXYScatterLinesNoMarkers
 
             Do While .SeriesCollection.Count > 0
                 .SeriesCollection(1).Delete
@@ -704,14 +745,16 @@ Private Sub BuildCharts(ByVal ds As Worksheet, _
             For i = 1 To itemCount
                 If specs(i).GroupIndex = g Then
                     memberCount = memberCount + 1
-                    singleTitle = specs(i).Header
 
                     Set values = ds.Range( _
                         ds.Cells(firstRow, specs(i).ColumnIndex), _
                         ds.Cells(lastRow, specs(i).ColumnIndex))
 
                     candidate = Application.WorksheetFunction.Max(values)
-                    If candidate > maxValue Then maxValue = candidate
+
+                    If candidate > maxValue Then
+                        maxValue = candidate
+                    End If
 
                     Set ser = .SeriesCollection.NewSeries
 
@@ -729,14 +772,10 @@ Private Sub BuildCharts(ByVal ds As Worksheet, _
             Next i
 
             .HasTitle = True
-
-            If memberCount = 1 Then
-                .ChartTitle.Text = singleTitle
-            Else
-                .ChartTitle.Text = labels(g)
-            End If
-
+            .ChartTitle.Text = " "
+            .ChartTitle.Format.TextFrame2.TextRange.Text = labels(g)
             .ChartTitle.Font.Size = 10
+
             .HasLegend = (memberCount > 1)
 
             If .HasLegend Then
@@ -757,12 +796,9 @@ Private Sub BuildCharts(ByVal ds As Worksheet, _
                 .MaximumScale = maxValue
             End With
 
-            With .Axes(xlCategory)
-                .CategoryType = xlCategoryScale
-                .TickLabels.NumberFormat = "mm/dd hh:mm:ss"
-                .TickLabelSpacing = _
-                    Application.Min(31999, 1 + (lastRow - firstRow) \ 8)
-            End With
+            SetHourlyTimeAxis co.Chart, _
+                CDbl(ds.Cells(firstRow, 1).Value2), _
+                CDbl(ds.Cells(lastRow, 1).Value2)
         End With
     Next g
 End Sub
@@ -973,11 +1009,14 @@ Private Function ReadCsvRecord(ByRef body As String, _
 
         ElseIf ch = "," Or ch = vbCr Or ch = vbLf Then
             PushField fields, count, capacity, value
+
             value = vbNullString
             closed = False
 
             If ch <> "," Then
-                If ch = vbCr And Mid$(body, p, 1) = vbLf Then p = p + 1
+                If ch = vbCr And Mid$(body, p, 1) = vbLf Then
+                    p = p + 1
+                End If
 
                 ReDim Preserve fields(0 To count - 1)
                 ReadCsvRecord = fields
@@ -1094,7 +1133,9 @@ Private Function ParseTimestamp(ByVal text As String, _
 
     If Len(ap) > 0 Then
         If hh < 1 Or hh > 12 Then GoTo Invalid
+
         hh = hh Mod 12
+
         If ap = "PM" Then hh = hh + 12
     End If
 
