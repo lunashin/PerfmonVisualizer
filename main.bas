@@ -1,7 +1,7 @@
 Attribute VB_Name = "PerfmonVisualizer"
 Option Explicit
 
-Private Const CONSOLE_NAME As String = "ŠÇ—ƒRƒ“ƒ\[ƒ‹"
+Private Const CONSOLE_NAME As String = "ï¿½Ç—ï¿½ï¿½Rï¿½ï¿½ï¿½\ï¿½[ï¿½ï¿½"
 Private Const DAILY_TIME_MARKER As String = "__PMV_DAILY_TIME__"
 Private Const CSV_CHARSET As String = "shift_jis"
 Private Const DATE_ORDER As String = "MDY"
@@ -410,7 +410,9 @@ Private Sub ReadSettings(ByVal ws As Worksheet, ByRef specs() As CounterSpec, _
                 .Header = header
                 .Description = Trim$(CStr(ws.Cells(r, "D").Value2))
                 .GroupIndex = g
-                .LineColor = CLng(ws.Cells(r, "B").DisplayFormat.Font.Color)
+                If Not dailyMode Then
+                    .LineColor = CLng(ws.Cells(r, "B").DisplayFormat.Font.Color)
+                End If
             End With
             g = specs(itemCount).GroupIndex
             If Len(labels(g)) > 0 Then labels(g) = labels(g) & vbLf
@@ -967,11 +969,17 @@ Private Sub BuildDailyCharts(ByVal ds As Worksheet, ByVal gs As Worksheet, _
     ByRef firsts() As Long, ByRef lasts() As Long, ByVal widthPx As Double, _
     ByVal heightPx As Double, ByVal wn As Excel.Window)
     Dim i As Long, d As Long, co As ChartObject, ser As Series
+    Dim dayColors() As Long
     Dim x As Range, y As Range, allValues As Range, maxValue As Double
     Dim width As Double, height As Double, gap As Double, dashStyles As Variant
     ChartSize wn, widthPx, heightPx, width, height, gap
     dashStyles = Array(msoLineSolid, msoLineDash, msoLineRoundDot, _
                        msoLineDashDot, msoLineLongDash, msoLineDashDotDot)
+    ' Build one chronological date-to-color mapping shared by every chart.
+    ReDim dayColors(1 To dayCount)
+    For d = 1 To dayCount
+        dayColors(d) = DailyLineColor(d)
+    Next d
     For i = 1 To itemCount
         Application.StatusBar = "Creating daily chart " & CStr(i) & "/" & CStr(itemCount)
         Set co = gs.ChartObjects.Add(0, (i - 1) * (height + gap), width, height)
@@ -994,11 +1002,11 @@ Private Sub BuildDailyCharts(ByVal ds As Worksheet, ByVal gs As Worksheet, _
             If firsts(d) = lasts(d) Then
                 ser.MarkerStyle = xlMarkerStyleCircle
                 ser.MarkerSize = 3
-                ser.MarkerForegroundColor = specs(i).LineColor
-                ser.MarkerBackgroundColor = specs(i).LineColor
+                ser.MarkerForegroundColor = dayColors(d)
+                ser.MarkerBackgroundColor = dayColors(d)
             End If
             ser.Format.Line.Visible = msoTrue
-            ser.Format.Line.ForeColor.RGB = specs(i).LineColor
+            ser.Format.Line.ForeColor.RGB = dayColors(d)
             ser.Format.Line.Weight = 1.5
             ser.Format.Line.DashStyle = dashStyles((d - 1) Mod 6)
             ser.Smooth = False
@@ -1010,3 +1018,35 @@ Private Sub BuildDailyCharts(ByVal ds As Worksheet, ByVal gs As Worksheet, _
         Set24HourAxis co.Chart
     Next i
 End Sub
+
+' Deterministic palette by chronological date index within the selected period.
+' Golden-angle hue spacing avoids a short repeating palette for long periods.
+Private Function DailyLineColor(ByVal dayIndex As Long) As Long
+    Const SATURATION As Double = 0.7
+    Const BRIGHTNESS As Double = 0.8
+    Dim hue As Double, sector As Long, fraction As Double
+    Dim p As Double, q As Double, t As Double
+    Dim red As Double, green As Double, blue As Double
+    hue = 0.58 + (dayIndex - 1) * 0.618033988749895
+    hue = (hue - Fix(hue)) * 6#
+    sector = Fix(hue)
+    fraction = hue - sector
+    p = BRIGHTNESS * (1# - SATURATION)
+    q = BRIGHTNESS * (1# - SATURATION * fraction)
+    t = BRIGHTNESS * (1# - SATURATION * (1# - fraction))
+    Select Case sector
+        Case 0
+            red = BRIGHTNESS: green = t: blue = p
+        Case 1
+            red = q: green = BRIGHTNESS: blue = p
+        Case 2
+            red = p: green = BRIGHTNESS: blue = t
+        Case 3
+            red = p: green = q: blue = BRIGHTNESS
+        Case 4
+            red = t: green = p: blue = BRIGHTNESS
+        Case Else
+            red = BRIGHTNESS: green = p: blue = q
+    End Select
+    DailyLineColor = RGB(CLng(red * 255#), CLng(green * 255#), CLng(blue * 255#))
+End Function
