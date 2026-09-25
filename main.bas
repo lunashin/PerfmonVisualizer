@@ -1,7 +1,7 @@
 Attribute VB_Name = "PerfmonVisualizer"
 Option Explicit
 
-Private Const CONSOLE_NAME As String = "ÔøΩ«óÔøΩÔøΩRÔøΩÔøΩÔøΩ\ÔøΩ[ÔøΩÔøΩ"
+Private Const CONSOLE_NAME As String = "ä«óùÉRÉìÉ\Å[Éã"
 Private Const DAILY_TIME_MARKER As String = "__PMV_DAILY_TIME__"
 Private Const CSV_CHARSET As String = "shift_jis"
 Private Const DATE_ORDER As String = "MDY"
@@ -127,9 +127,9 @@ Private Function RebuildGraphs(ByVal ds As Worksheet, ByVal gs As Worksheet) As 
             If fromDate > toDate Then Fail "H24 is later than H25."
         End If
     End If
-    ResolveColumns ds, specs, itemCount
+    ResolveColumns ds, specs, itemCount, labels, groupCount
     FindPlotRows ds, hasStart, fromDate, hasEnd, toDate, endExclusive, firstRow, lastRow
-    If dailyMode Then
+    If dailyMode And itemCount > 0 Then
         CheckDailyTimeColumn gs
         dayCount = GetDaySegments(ds, firstRow, lastRow, days, firsts, lasts, times)
     End If
@@ -143,11 +143,13 @@ Private Function RebuildGraphs(ByVal ds As Worksheet, ByVal gs As Worksheet) As 
         gs.ChartObjects(1).Delete
     Loop
     ClearDailyTimes gs
+    WritePlotPeriod ds, gs, firstRow, lastRow
+    If itemCount = 0 Then Exit Function
     If dailyMode Then
         WriteDailyTimes gs, times
         BuildDailyCharts ds, gs, specs, itemCount, firstRow, lastRow, dayCount, _
                          days, firsts, lasts, widthPx, heightPx, ActiveWindow
-        RebuildGraphs = itemCount
+        RebuildGraphs = itemCount * 2
     Else
         BuildCharts ds, gs, specs, itemCount, labels, groupCount, _
                     firstRow, lastRow, widthPx, heightPx, ActiveWindow
@@ -155,8 +157,15 @@ Private Function RebuildGraphs(ByVal ds As Worksheet, ByVal gs As Worksheet) As 
     End If
 End Function
 
-Private Sub ResolveColumns(ByVal ds As Worksheet, ByRef specs() As CounterSpec, ByVal count As Long)
+Private Sub ResolveColumns(ByVal ds As Worksheet, ByRef specs() As CounterSpec, ByRef count As Long, _
+    ByRef labels() As String, ByRef groupCount As Long)
     Dim headers() As String, columns() As Long, lastColumn As Long, c As Long, i As Long
+    Dim kept As Long, oldGroup As Long, newGroup As Long, groupMap() As Long
+    ReDim groupMap(1 To groupCount)
+    For i = 1 To groupCount
+        labels(i) = vbNullString
+    Next i
+    groupCount = 0
     lastColumn = ds.Cells(1, ds.Columns.Count).End(xlToLeft).Column
     If lastColumn < 2 Then Fail "The data sheet has no counter columns."
     ReDim headers(1 To lastColumn)
@@ -174,9 +183,26 @@ Private Sub ResolveColumns(ByVal ds As Worksheet, ByRef specs() As CounterSpec, 
     Next c
     For i = 1 To count
         specs(i).ColumnIndex = FindHeader(headers, columns, specs(i).Header)
-        If specs(i).ColumnIndex = 0 Then Fail "Column not found: " & specs(i).Header
         If specs(i).ColumnIndex = 1 Then Fail "The timestamp cannot be a counter."
+        If specs(i).ColumnIndex > 1 Then
+            oldGroup = specs(i).GroupIndex
+            If groupMap(oldGroup) = 0 Then
+                groupCount = groupCount + 1
+                groupMap(oldGroup) = groupCount
+            End If
+            newGroup = groupMap(oldGroup)
+            kept = kept + 1
+            ' Copy fields explicitly so no UDT assignment dependency is needed.
+            specs(kept).Header = specs(i).Header
+            specs(kept).Description = specs(i).Description
+            specs(kept).ColumnIndex = specs(i).ColumnIndex
+            specs(kept).LineColor = specs(i).LineColor
+            specs(kept).GroupIndex = newGroup
+            If Len(labels(newGroup)) > 0 Then labels(newGroup) = labels(newGroup) & vbLf
+            labels(newGroup) = labels(newGroup) & CounterTitle(specs(kept))
+        End If
     Next i
+    count = kept
 End Sub
 
 Private Sub FindPlotRows(ByVal ds As Worksheet, ByVal hasStart As Boolean, ByVal fromDate As Double, _
@@ -500,22 +526,16 @@ Private Sub BuildCharts(ByVal ds As Worksheet, ByVal gs As Worksheet, _
     ByVal groupCount As Long, ByVal firstRow As Long, ByVal lastRow As Long, _
     ByVal widthPx As Double, ByVal heightPx As Double, ByVal wn As Excel.Window)
     Dim g As Long, i As Long, memberCount As Long
-    Dim co As ChartObject, ser As Series, values As Range, x As Range
+    Dim co As ChartObject, values As Range, x As Range
     Dim maxValue As Double, candidate As Double, width As Double, height As Double, gap As Double
     ChartSize wn, widthPx, heightPx, width, height, gap
     Set x = ds.Range(ds.Cells(firstRow, 1), ds.Cells(lastRow, 1))
     For g = 1 To groupCount
         Application.StatusBar = "Creating chart " & CStr(g) & "/" & CStr(groupCount)
-        Set co = gs.ChartObjects.Add(0, (g - 1) * (height + gap), width, height)
-        co.Name = CHART_PREFIX & CStr(g)
-        co.Placement = xlFreeFloating
+        Set co = NewPlot(gs, g, width, height, gap)
         maxValue = 0
         memberCount = 0
         With co.Chart
-            .ChartType = xlXYScatterLinesNoMarkers
-            Do While .SeriesCollection.Count > 0
-                .SeriesCollection(1).Delete
-            Loop
             For i = 1 To itemCount
                 If specs(i).GroupIndex = g Then
                     memberCount = memberCount + 1
@@ -523,16 +543,7 @@ Private Sub BuildCharts(ByVal ds As Worksheet, ByVal gs As Worksheet, _
                                           ds.Cells(lastRow, specs(i).ColumnIndex))
                     candidate = Application.WorksheetFunction.Max(values)
                     If candidate > maxValue Then maxValue = candidate
-                    Set ser = .SeriesCollection.NewSeries
-                    ser.Name = "='" & Replace(ds.Name, "'", "''") & "'!" & _
-                               ds.Cells(1, specs(i).ColumnIndex).Address
-                    ser.XValues = x
-                    ser.Values = values
-                    ser.MarkerStyle = xlMarkerStyleNone
-                    ser.Format.Line.Visible = msoTrue
-                    ser.Format.Line.ForeColor.RGB = specs(i).LineColor
-                    ser.Format.Line.Weight = 1.5
-                    ser.Smooth = False
+                    AddCounterSeries co.Chart, ds, specs(i), x, values, specs(i).LineColor
                 End If
             Next i
             FinishPlot co.Chart, labels(g), (memberCount > 1), maxValue
@@ -584,7 +595,7 @@ Public Sub ResizePerfmonCharts(ByVal wn As Excel.Window)
         If Left$(co.Name, Len(CHART_PREFIX)) = CHART_PREFIX Then
             index = CLng(Mid$(co.Name, Len(CHART_PREFIX) + 1))
             co.Left = 0
-            co.Top = (index - 1) * (height + gap)
+            co.Top = ws.Rows(1).Height + gap + (index - 1) * (height + gap)
             co.Width = width
             co.Height = height
         End If
@@ -982,13 +993,9 @@ Private Sub BuildDailyCharts(ByVal ds As Worksheet, ByVal gs As Worksheet, _
     Next d
     For i = 1 To itemCount
         Application.StatusBar = "Creating daily chart " & CStr(i) & "/" & CStr(itemCount)
-        Set co = gs.ChartObjects.Add(0, (i - 1) * (height + gap), width, height)
-        co.Name = CHART_PREFIX & CStr(i)
-        co.Placement = xlFreeFloating
-        co.Chart.ChartType = xlXYScatterLinesNoMarkers
-        Do While co.Chart.SeriesCollection.Count > 0
-            co.Chart.SeriesCollection(1).Delete
-        Loop
+        BuildPeriodChart ds, gs, specs(i), firstRow, lastRow, _
+                         2 * i - 1, width, height, gap
+        Set co = NewPlot(gs, 2 * i, width, height, gap)
         For d = 1 To dayCount
             Set x = gs.Range(gs.Cells(firsts(d) - firstRow + 2, gs.Columns.Count), _
                              gs.Cells(lasts(d) - firstRow + 2, gs.Columns.Count))
@@ -1049,4 +1056,67 @@ Private Function DailyLineColor(ByVal dayIndex As Long) As Long
             red = BRIGHTNESS: green = p: blue = q
     End Select
     DailyLineColor = RGB(CLng(red * 255#), CLng(green * 255#), CLng(blue * 255#))
+End Function
+
+' Every plot starts below the period label, including after window resizing.
+Private Function NewPlot(ByVal gs As Worksheet, ByVal index As Long, _
+    ByVal width As Double, ByVal height As Double, ByVal gap As Double) As ChartObject
+    Dim co As ChartObject
+    Set co = gs.ChartObjects.Add(0, gs.Rows(1).Height + gap + _
+                                (index - 1) * (height + gap), width, height)
+    co.Name = CHART_PREFIX & CStr(index)
+    co.Placement = xlFreeFloating
+    co.Chart.ChartType = xlXYScatterLinesNoMarkers
+    Do While co.Chart.SeriesCollection.Count > 0
+        co.Chart.SeriesCollection(1).Delete
+    Loop
+    Set NewPlot = co
+End Function
+
+Private Sub AddCounterSeries(ByVal chart As Chart, ByVal ds As Worksheet, _
+    ByRef spec As CounterSpec, ByVal x As Range, ByVal y As Range, ByVal color As Long)
+    Dim ser As Series
+    Set ser = chart.SeriesCollection.NewSeries
+    ser.Name = "='" & Replace(ds.Name, "'", "''") & "'!" & ds.Cells(1, spec.ColumnIndex).Address
+    ser.XValues = x
+    ser.Values = y
+    ser.MarkerStyle = xlMarkerStyleNone
+    ser.Format.Line.Visible = msoTrue
+    ser.Format.Line.ForeColor.RGB = color
+    ser.Format.Line.Weight = 1.5
+    ser.Smooth = False
+End Sub
+
+' In daily mode each counter gets a period plot followed by its daily overlay.
+Private Sub BuildPeriodChart(ByVal ds As Worksheet, ByVal gs As Worksheet, _
+    ByRef spec As CounterSpec, ByVal firstRow As Long, ByVal lastRow As Long, _
+    ByVal index As Long, ByVal width As Double, ByVal height As Double, ByVal gap As Double)
+    Dim co As ChartObject, x As Range, y As Range, maxValue As Double
+    Set co = NewPlot(gs, index, width, height, gap)
+    Set x = ds.Range(ds.Cells(firstRow, 1), ds.Cells(lastRow, 1))
+    Set y = ds.Range(ds.Cells(firstRow, spec.ColumnIndex), ds.Cells(lastRow, spec.ColumnIndex))
+    AddCounterSeries co.Chart, ds, spec, x, y, DailyLineColor(1)
+    maxValue = Application.WorksheetFunction.Max(y)
+    FinishPlot co.Chart, CounterTitle(spec), False, maxValue
+    SetHourlyTimeAxis co.Chart, CDbl(ds.Cells(firstRow, 1).Value2), _
+                      CDbl(ds.Cells(lastRow, 1).Value2)
+End Sub
+
+Private Sub WritePlotPeriod(ByVal ds As Worksheet, ByVal gs As Worksheet, _
+    ByVal firstRow As Long, ByVal lastRow As Long)
+    With gs.Range("A1")
+        .NumberFormat = "@"
+        .Value2 = JapaneseTimestamp(CDate(ds.Cells(firstRow, 1).Value2)) & " Å` " & _
+                  JapaneseTimestamp(CDate(ds.Cells(lastRow, 1).Value2))
+        .WrapText = False
+    End With
+    gs.Rows(1).AutoFit
+End Sub
+
+' VBA Format does not support Excel's aaa token. Use explicit Japanese weekdays.
+Private Function JapaneseTimestamp(ByVal stamp As Date) As String
+    Dim weekdays As Variant
+    weekdays = Array("ì˙", "åé", "âŒ", "êÖ", "ñÿ", "ã‡", "ìy")
+    JapaneseTimestamp = Format$(stamp, "yyyy/mm/dd") & "(" & _
+                        weekdays(Weekday(stamp, vbSunday) - 1) & ") " & Format$(stamp, "hh:nn")
 End Function
